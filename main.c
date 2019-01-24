@@ -1,15 +1,47 @@
 /* main.c -- main file for tiny tft */
 
 #include <SDL2/SDL.h>
+#include <unistd.h>
 #include <stdlib.h>
 #include <stdint.h>
+#include <pthread.h>
 #include <getopt.h>
 
+#define SDL_CREATE(r, f)											\
+	if (r) { fprintf(stderr, "%s Error: %s\n", f, SDL_GetError());	\
+		SDL_Quit();													\
+		exit(EXIT_FAILURE); }
+
+struct Threadargs
+{
+	/* file descriptor to send data */
+	int out;
+	/* SDL event to raise on read */
+	uint32_t event;
+	/* frame size to read in bytes */
+	size_t fsize;
+	/* time to sleep between each read in ms */
+	int wait;
+};
+
+/* print usage information and exit */
+void
+usage()
+{
+	printf("Usage: ttft -h ?? -w ??\n\
+Tiny TFT: Display video data read from stdin\n\n\
+ -h\tdisplay this help message\n\
+ -x\tvideo width (mandatory)\n\
+ -y\tvideo height (mandatory)\n\
+ -s\tscaling factor\n\
+ -f\tminimum wait time between frames (ms)\n");
+	exit(0);
+}
 
 /* convert mono1 array to RBG bitmap format for SDL
    return an array which must be freed. return null on failure */
 uint8_t*
-mono1torgb24(char *mono, int w, int h)
+mono1torgb24(uint8_t *mono, int w, int h)
 {
 	uint8_t *rgb;
 	int i, j, k;
@@ -36,10 +68,36 @@ mono1torgb24(char *mono, int w, int h)
 	return rgb;
 }
 
+void*
+thread_read_input(void *targs)
+{
+	struct Threadargs *args = (struct Threadargs *)targs;
+	uint8_t input[args->fsize];
+	SDL_Event e;
+
+	/* read from pipe -- if a frame is read feed it into next pipe */
+	/* otherwise raise an SDL_QUIT event */
+	SDL_memset(&e, 0, sizeof(e));
+	e.type = args->event;
+
+	while (fread(input, 1, args->fsize, stdin) == args->fsize) {
+		write(args->out, input, args->fsize);
+		SDL_PushEvent(&e);
+		if (args->wait)
+			usleep(1000 * args->wait);
+	}
+
+	puts("reached end of input");
+	e.type = SDL_QUIT;
+	SDL_PushEvent(&e);
+
+	pthread_exit(NULL);
+}
+
 /* render the current frame to the given streamable SDL texture
    return 0 on success; else -1 */
 int
-sdl_render_frame(char *mono, SDL_Texture *tex, int w, int h)
+sdl_render_frame(uint8_t *mono, SDL_Texture *tex, int w, int h)
 {
 	uint8_t *memrgb24;
 	int r = 0;
@@ -69,19 +127,6 @@ sdl_present_frame(SDL_Renderer *rdr, SDL_Texture *tex)
 	return;
 }
 
-/* read a single frame from stdin and store it in input
-   return -1 on error, else number of bytes read */
-int
-read_frame(char *input, int w, int h)
-{
-	int n;
-	for (n = 0; n < (w*h) / 8;) {
-		n += fread(input, 1, (w*h) / 8, stdin);
-
-	}
-	return n;
-}
-
 int
 main(int argc, char **argv)
 {
@@ -89,92 +134,102 @@ main(int argc, char **argv)
 	SDL_Renderer *sdlrdr;
 	SDL_Texture *sdltex;
 	SDL_Event e;
-	int pause, quit;
-	char c;
+	int quit;
+	char arg;
 	int width, height, scale;
-	char *input;
+	int wait;
+	size_t fsize;
+	uint8_t *input;
+	pthread_t inthread;
+	int pipefd[2];
+	Uint32 sdl_new_frame;
+	struct Threadargs args;
 
-	width = height = scale = 0;
-	while ((c = getopt (argc, argv, "w:h:s:")) != -1) {
-		switch (c) {
-		case 'w':
+	/* default values */
+	height = 32;
+	width = 64;
+	scale = 10;
+	wait = 0;
+	fsize = (width * height) / 8;
+	input = malloc(fsize);
+	while ((arg = getopt (argc, argv, "hx:y:s:f:")) != -1) {
+		switch (arg) {
+		case 'h':
+			usage();
+			break;
+		case 'x':
 			width = atoi(optarg);
 			break;
-		case 'h':
+		case 'y':
 			height = atoi(optarg);
 			break;
 		case 's':
 			scale = atoi(optarg);
 			break;
+		case 'f':
+			wait = atoi(optarg);
+			break;
 		default:
-			exit(EXIT_FAILURE);
+			usage();
 		}
 	}
 
+	/* check sanity of args */
 	if (width <= 0 || height <= 0) {
-		fprintf(stderr, "usage: height and width must be provided\n");
-		exit(EXIT_FAILURE);
+		usage();
 	}
 
+	/* initialise SDL */
 	if (SDL_Init(SDL_INIT_VIDEO) != 0) {
 		fprintf(stderr, "SDL_Init Error: %s\n", SDL_GetError());
 	}
+	SDL_CREATE(!(sdlwin = SDL_CreateWindow("ttft", 0, 0, width*scale,
+										   height*scale, SDL_WINDOW_SHOWN)),
+			   "SDL_CreateWindow");
+	SDL_CREATE(!(sdlrdr = SDL_CreateRenderer(sdlwin, -1,
+											 SDL_RENDERER_ACCELERATED)),
+			   "SDL_CreateRenderer");
+	SDL_CREATE(!(sdltex = SDL_CreateTexture(sdlrdr, SDL_PIXELFORMAT_RGB24,
+											SDL_TEXTUREACCESS_STATIC,
+											width, height)),
+			   "SDL_CreateTexture");
+	SDL_CREATE(((sdl_new_frame = SDL_RegisterEvents(1)) == (Uint32)-1),
+			   "SDL_RegisterEvents");
 
-	/* Open SDL window */
-	sdlwin = SDL_CreateWindow("ttft", 0, 0, width*scale, height*scale,
-							  SDL_WINDOW_SHOWN);
-	if (!sdlwin) {
-		fprintf(stderr, "SDL_CreateWindow Error: %s\n", SDL_GetError());
-		SDL_Quit();
-		exit(1);
+	/* create pipe */
+	if (pipe(pipefd)) {
+		perror("pipe");
+		exit(EXIT_FAILURE);
 	}
 
-	/* Create SDL renderer */
-	sdlrdr = SDL_CreateRenderer(sdlwin, -1,
-								SDL_RENDERER_ACCELERATED|SDL_RENDERER_PRESENTVSYNC);
-	if (!sdlrdr) {
-		SDL_DestroyWindow(sdlwin);
-		fprintf(stderr, "SDL_CreateRenderer Error: %s\n", SDL_GetError());
-		SDL_Quit();
-		exit(1);
+	/* set up thread's args */
+	args.out = pipefd[1];
+	args.event = sdl_new_frame;
+	args.fsize = fsize;
+	args.wait = wait;
+
+	/* create thread to read from stdin and pass messages back to SDL */
+	if (pthread_create(&inthread, NULL, thread_read_input, (void *)&args)) {
+		perror("pthread_create");
+		exit(EXIT_FAILURE);
 	}
 
-	/* create texture */
-	sdltex = SDL_CreateTexture(sdlrdr, SDL_PIXELFORMAT_RGB24,
-							   SDL_TEXTUREACCESS_STATIC, width, height);
-	if (!sdltex) {
-		fprintf(stderr, "SDL_CreateTexture Error: %s\n", SDL_GetError());
-		SDL_Quit();
-		exit(1);
-	}
-
-	/* create input buffer, we need to account for the null byte */
-	input = malloc((width*height / 8) + 1);
-
-	int n = 0;
-	pause = quit = 0;
+	quit = 0;
 	/* main loop */
 	while (!quit) {
-		/* first frame will be completely black */
-		while (SDL_PollEvent(&e)) {
-			switch (e.type) {
-			case SDL_QUIT:
+		/* TODO first frame will be completely black */
+		if (SDL_WaitEvent(&e)) {
+			if (e.type == SDL_WINDOWEVENT &&
+				e.window.event == SDL_WINDOWEVENT_EXPOSED)
+				sdl_present_frame(sdlrdr, sdltex);
+			else if (e.type == SDL_QUIT)
 				quit = 1;
-				fprintf(stderr, "received user quit\n");
-				break;
-			case SDL_WINDOWEVENT:
-				if (e.window.event == SDL_WINDOWEVENT_EXPOSED)
-					sdl_present_frame(sdlrdr, sdltex);
-			default:
-				break;
+			else if (e.type == sdl_new_frame) {
+				read(pipefd[0], input, fsize);
+				sdl_render_frame(input, sdltex, width, height);
+				sdl_present_frame(sdlrdr, sdltex);
 			}
 		}
-		/* read from stdin and render given input */
-		/* read_frame is blocking, so the loop won't run out of control */
-		n = read_frame(input, width, height);
-		sdl_render_frame(input, sdltex, width, height);
-		sdl_present_frame(sdlrdr, sdltex);
-		printf("rendered frame %d bytes\n", n);
 	}
 
 	SDL_DestroyTexture(sdltex);
