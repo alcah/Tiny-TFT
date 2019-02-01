@@ -28,7 +28,7 @@ struct Threadargs
 void
 usage()
 {
-	printf("Usage: ttft -h ?? -w ??\n\
+	printf("Usage: ttft -x ?? -y ??\n\
 Tiny TFT: Display video data read from stdin\n\n\
  -h\tdisplay this help message\n\
  -x\tvideo width (mandatory)\n\
@@ -87,7 +87,6 @@ thread_read_input(void *targs)
 			usleep(1000 * args->wait);
 	}
 
-	puts("reached end of input");
 	e.type = SDL_QUIT;
 	SDL_PushEvent(&e);
 
