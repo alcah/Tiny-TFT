@@ -134,10 +134,11 @@ main(int argc, char **argv)
 	SDL_Renderer *sdlrdr;
 	SDL_Texture *sdltex;
 	SDL_Event e;
-	int quit;
+	int quit = 0;
 	char arg;
-	int width, height, scale;
-	int wait;
+	int width = -1, height = -1;
+	int scale = 10;
+	int wait = 0;
 	size_t fsize;
 	uint8_t *input;
 	pthread_t inthread;
@@ -145,13 +146,6 @@ main(int argc, char **argv)
 	Uint32 sdl_new_frame;
 	struct Threadargs args;
 
-	/* default values */
-	height = 32;
-	width = 64;
-	scale = 10;
-	wait = 0;
-	fsize = (width * height) / 8;
-	input = malloc(fsize);
 	while ((arg = getopt (argc, argv, "hx:y:s:f:")) != -1) {
 		switch (arg) {
 		case 'h':
@@ -178,6 +172,8 @@ main(int argc, char **argv)
 	if (width <= 0 || height <= 0) {
 		usage();
 	}
+	fsize = (width * height) / 8;
+	input = calloc(1, fsize);
 
 	/* initialise SDL */
 	if (SDL_Init(SDL_INIT_VIDEO) != 0) {
@@ -214,10 +210,11 @@ main(int argc, char **argv)
 		exit(EXIT_FAILURE);
 	}
 
-	quit = 0;
+	/* initial frame */
+	sdl_render_frame(input, sdltex, width, height);
+	sdl_present_frame(sdlrdr, sdltex);
 	/* main loop */
 	while (!quit) {
-		/* TODO first frame will be completely black */
 		if (SDL_WaitEvent(&e)) {
 			if (e.type == SDL_WINDOWEVENT &&
 				e.window.event == SDL_WINDOWEVENT_EXPOSED)
