@@ -19,7 +19,7 @@ ttft currently supports the following options:
 - -x: width of input feed (mandatory)
 - -y: height of input feed (mandatory)
 - -s: scaling factor for video output (default: 10)
-- -f: minimum wait time between frames in ms
+- -w: minimum wait time between frames in ms
 
 # Possible Future Features
 - Foreground and background colour options

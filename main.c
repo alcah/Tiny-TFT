@@ -34,14 +34,16 @@ Tiny TFT: Display video data read from stdin\n\n\
  -x\tvideo width (mandatory)\n\
  -y\tvideo height (mandatory)\n\
  -s\tscaling factor\n\
- -f\tminimum wait time between frames (ms)\n");
+ -w\tminimum wait time between frames (ms)\n\
+ -f\tforeground (on) colour in rgb hex notation\n\
+ -b\tbackground (off) colour in rgb hex notation\n");
 	exit(0);
 }
 
 /* convert mono1 array to RBG bitmap format for SDL
    return an array which must be freed. return null on failure */
 uint8_t*
-mono1torgb24(uint8_t *mono, int w, int h)
+mono1torgb24(uint8_t *mono, int w, int h, int fg, int bg)
 {
 	uint8_t *rgb;
 	int i, j, k;
@@ -58,9 +60,11 @@ mono1torgb24(uint8_t *mono, int w, int h)
 		   each mono bit corresponds to 3 rgb bytes */
 		k = i * 24;
 		for (j = 7; j >= 0; j--) {
-			rgb[k] = mono[i] & 1 << j ? 0xFF : 0x00;
-			rgb[k + 1] = mono[i] & 1 << j ? 0xFF : 0x00;
-			rgb[k + 2] = mono[i] & 1 << j ? 0xFF : 0x00;
+			/* we set each colour component to the corresponding byte
+			 * in fg or bg */
+			rgb[k] = mono[i] & 1 << j ? fg >> 16 : bg >> 16;
+			rgb[k + 1] = mono[i] & 1 << j ? (fg >> 8) & 0xFF : (bg >> 8) & 0xFF;
+			rgb[k + 2] = mono[i] & 1 << j ? fg & 0xFF : bg & 0xFF;
 			k += 3;
 		}
 	}
@@ -96,12 +100,12 @@ thread_read_input(void *targs)
 /* render the current frame to the given streamable SDL texture
    return 0 on success; else -1 */
 int
-sdl_render_frame(uint8_t *mono, SDL_Texture *tex, int w, int h)
+sdl_render_frame(uint8_t *mono, SDL_Texture *tex, int w, int h, int fg, int bg)
 {
 	uint8_t *memrgb24;
 	int r = 0;
 
-	if (!(memrgb24 = mono1torgb24(mono, w, h))) {
+	if (!(memrgb24 = mono1torgb24(mono, w, h, fg, bg))) {
 		perror("mono1torgb24 error");
 		return -1;
 	}
@@ -138,6 +142,7 @@ main(int argc, char **argv)
 	int width = -1, height = -1;
 	int scale = 10;
 	int wait = 0;
+	int fg = 0xFFFFFF, bg = 0x000000;
 	size_t fsize;
 	uint8_t *input;
 	pthread_t inthread;
@@ -145,7 +150,7 @@ main(int argc, char **argv)
 	Uint32 sdl_new_frame;
 	struct Threadargs args;
 
-	while ((arg = getopt (argc, argv, "hx:y:s:f:")) != -1) {
+	while ((arg = getopt (argc, argv, "hx:y:s:w:f:b:")) != -1) {
 		switch (arg) {
 		case 'h':
 			usage();
@@ -159,8 +164,18 @@ main(int argc, char **argv)
 		case 's':
 			scale = atoi(optarg);
 			break;
-		case 'f':
+		case 'w':
 			wait = atoi(optarg);
+			break;
+		case 'f':
+			if (optarg[0] == '#')
+				optarg++;
+			fg = strtol(optarg, NULL, 16);
+			break;
+		case 'b':
+			if (optarg[0] == '#')
+				optarg++;
+			bg = strtol(optarg, NULL, 16);
 			break;
 		default:
 			usage();
@@ -210,7 +225,7 @@ main(int argc, char **argv)
 	}
 
 	/* initial frame */
-	sdl_render_frame(input, sdltex, width, height);
+	sdl_render_frame(input, sdltex, width, height, fg, bg);
 	sdl_present_frame(sdlrdr, sdltex);
 	/* main loop */
 	while (!quit) {
@@ -222,7 +237,7 @@ main(int argc, char **argv)
 				quit = 1;
 			else if (e.type == sdl_new_frame) {
 				read(pipefd[0], input, fsize);
-				sdl_render_frame(input, sdltex, width, height);
+				sdl_render_frame(input, sdltex, width, height, fg, bg);
 				sdl_present_frame(sdlrdr, sdltex);
 			}
 		}
